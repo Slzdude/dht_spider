@@ -2,7 +2,7 @@ import hashlib
 import os.path
 import random
 import socket
-from queue import Queue
+from queue import Queue, Empty
 from struct import unpack, pack
 from threading import Thread
 from time import sleep
@@ -11,6 +11,9 @@ import MetadataInquirer
 from libs import pymmh3, decodeh
 from libs.SQLiteUtil import SQLiteUtil
 from libs.bencode import bencode, bdecode
+from libs.logger import setup_logger
+
+logger = setup_logger("DHTSpider")
 
 
 def random_id():
@@ -81,6 +84,7 @@ class Spider(Thread):
         self.ufd.bind((self.bind_ip, self.bind_port))
 
     def start(self):
+
         Thread(target=self.join_dht).start()
         Thread(target=self.receiver).start()
         Thread(target=self.sniffer).start()
@@ -110,44 +114,50 @@ class Spider(Thread):
     def sniffer(self):
         while self.isSpiderWorking:
             for _ in range(200):
-                if self.isSpiderWorking:
-                    if len(self.node_list) == 0:
-                        sleep(1)
-                    else:
-                        # 伪装成目标相邻点在查找
-                        # print('send packet')
-                        node = self.node_list.pop(0)  # 线程安全 global interpreter lock
-                        self.send_find_node((node.ip, node.port), get_neighbor_id(node.nid))
+                if not self.isSpiderWorking:
+                    break
+                if len(self.node_list) == 0:
+                    sleep(1)
+                    continue
+                try:
+                    # 伪装成目标相邻点在查找
+                    node = self.node_list.pop(0)  # 线程安全 global interpreter lock
+                    self.send_find_node((node.ip, node.port), get_neighbor_id(node.nid))
+                except:
+                    pass
             if self.isSpiderWorking:
                 sleep(10)
 
     # 接收ping, find_node, get_peers, announce_peer请求和find_node回复
     def receiver(self):
         while self.isSpiderWorking:
-            try:
-                (data, address) = self.ufd.recvfrom(65536)
-                # print('receive udp packet')
-                msg = bdecode(data)
-                # print msg
-                if msg['y'] == 'r':
-                    if 'nodes' in msg['r']:
-                        self.process_find_node_response(msg)
-                elif msg['y'] == 'q':
-                    if msg['q'] == 'ping':
-                        self.send_pong(msg, address)
-                    elif msg['q'] == 'find_node':
-                        self.process_find_node_request(msg, address)
-                    elif msg['q'] == 'get_peers':
-                        self.process_get_peers_request(msg, address)
-                    elif msg['q'] == 'announce_peer':
-                        self.process_announce_peer_request(msg, address)
-            except:
-                pass
+            (data, address) = self.ufd.recvfrom(65536)
+            logger.debug(f'receive udp packet length: {len(data)}')
+            msg = bdecode(data)
+            if msg[b'y'] == b'r':
+                if b'nodes' in msg[b'r']:
+                    logger.debug("Process Find Node")
+                    self.process_find_node_response(msg)
+            elif msg[b'y'] == b'q':
+                if msg[b'q'] == b'ping':
+                    logger.debug("Process Ping")
+                    self.send_pong(msg, address)
+                elif msg[b'q'] == b'find_node':
+                    logger.info("Process Find Node")
+                    self.process_find_node_request(msg, address)
+                elif msg[b'q'] == b'get_peers':
+                    logger.info("Process Get Peers")
+                    self.process_get_peers_request(msg, address)
+                elif msg[b'q'] == b'announce_peer':
+                    logger.info("Process Announce Peer")
+                    self.process_announce_peer_request(msg, address)
+                else:
+                    logger.info("Message" + msg[b'q'].decode())
 
     # 发送本节点状态正常信息
     def send_pong(self, msg, address):
         msg = {
-            't': msg['t'],
+            't': msg[b't'],
             'y': 'r',
             'r': {'id': self.nid}
         }
@@ -167,19 +177,23 @@ class Spider(Thread):
     def process_find_node_response(self, res):
         if len(self.node_list) > self.max_node_size:  # 限定队列大小
             return
-        nodes = KNode.decode_nodes(res['r']['nodes'])
+        nodes = KNode.decode_nodes(res[b'r'][b'nodes'])
         for node in nodes:
             (nid, ip, port) = node
-            if len(nid) != 20: continue
-            if nid == self.nid: continue  # 排除自己
-            if ip == self.bind_ip: continue
-            if port < 1 or port > 65535: continue
+            if len(nid) != 20:
+                continue
+            if nid == self.nid:
+                continue  # 排除自己
+            if ip == self.bind_ip:
+                continue
+            if port < 1 or port > 65535:
+                continue
             self.node_list.append(KNode(nid, ip, port))
 
     # 回应find_node请求信息
     def process_find_node_request(self, req, address):
         msg = {
-            't': req['t'],
+            't': req[b't'],
             'y': 'r',
             'r': {'id': get_neighbor_id(self.nid), 'nodes': KNode.encode_nodes(self.node_list[:8])}
         }
@@ -187,31 +201,32 @@ class Spider(Thread):
 
     # 回应get_peer请求信息
     def process_get_peers_request(self, req, address):
-        infohash = req['a']['info_hash']
+        info_hash = req[b'a'][b'info_hash']
         msg = {
-            't': req['t'],
+            't': req[b't'],
             'y': 'r',
             'r': {
-                'id': get_neighbor_id(infohash, 3),
+                'id': get_neighbor_id(info_hash, 3),
                 'nodes': KNode.encode_nodes(self.node_list[:8]),
-                'token': infohash[:4]  # 自定义token，例如取infohash最后四位
+                'token': info_hash[:4]  # 自定义token，例如取info_hash最后四位
             }
         }
         self.ufd.sendto(bencode(msg), address)
 
     # 处理声明下载peer请求信息，用于获取有效的种子信息
     def process_announce_peer_request(self, req, address):
-        infohash = req['a']['info_hash']
-        token = req['a']['token']
-        if infohash[:4] == token:  # 自定义的token规则校验
-            if 'implied_port' in req['a'] and req['a']['implied_port'] != 0:
+        info_hash = req[b'a'][b'info_hash']
+        token = req[b'a'][b'token']
+        if info_hash[:4] == token:  # 自定义的token规则校验
+            if b'implied_port' in req[b'a'] and req[b'a'][b'implied_port'] != 0:
                 port = address[1]
             else:
-                port = req['a']['port']
-                if port < 1 or port > 65535: return
+                port = req[b'a'][b'port']
+            if port < 1 or port > 65535:
+                return
 
-        # print('announce_peer:' + infohash.encode('hex') + ' ip:' + address[0])
-        self.inquiry_info_queue.put((infohash, (address[0], port)))  # 加入元数据获取信息队列
+        logger.info('announce_peer:' + info_hash.encode('hex') + ' ip:' + address[0])
+        self.inquiry_info_queue.put((info_hash, (address[0], port)))  # 加入元数据获取信息队列
 
         self.send_pong(req, address)
 
@@ -219,12 +234,12 @@ class Spider(Thread):
     def inquirer(self):
         while self.isSpiderWorking:
             # 只用于保证局部无重复，实际数据唯一性通过数据库唯一键保证
-            inquiry_info_bloom_filter = BloomFilter(5000, 5)
+            filter = BloomFilter(5000, 5)
             for _ in range(1000):
                 if self.isSpiderWorking:
                     try:
                         announce = self.inquiry_info_queue.get(timeout=0.3)
-                        if inquiry_info_bloom_filter.add(announce[0] + announce[1][0]):
+                        if filter.add(announce[0] + announce[1][0]):
                             # threads for download metadata
                             t = Thread(target=MetadataInquirer.inquire,
                                        args=(announce[0], announce[1], self.metadata_queue, 7))  # 超时时间不要太长防止短时间内线程过多
@@ -234,7 +249,7 @@ class Spider(Thread):
 
     # 记录种子信息
     def recorder(self):
-        db_name = 'matadata.db'
+        db_name = 'metadata.db'
         need_create_table = False
         if not os.path.exists(db_name):
             need_create_table = True
@@ -246,31 +261,14 @@ class Spider(Thread):
         while self.isSpiderWorking:
             try:
                 metadata = self.metadata_queue.get(timeout=0.5)
-                name = metadata['name']
-                try:
-                    name = name.decode('utf8')
-                except:
-                    try:
-                        name = name.decode('gb18030')
-                    except:
-                        try:
-                            name = decodeh.decode(name)
-                        except:
-                            continue
-                try:
-                    sqlite_util.execute(
-                        'insert into matadata (hash,name,size)values (?,?,?);',
-                        (metadata['hash'], name, metadata['size']))
-                    # import json
-                    # print json.dumps(metadata, ensure_ascii=False).decode('utf-8')
-                except:
-                    # import traceback
-                    # traceback.print_exc()
-                    # 通过hash属性唯一键去重
-                    # print metadata['hash']
-                    pass
-            except:
+                name = metadata[b'name']
+                name = decodeh.decode(name)
+                sqlite_util.execute('insert into matadata (hash,name,size)values (?,?,?);',
+                                    (metadata[b'hash'], name, metadata[b'size']))
+            except Empty:
                 sleep(0.5)
+            except Exception as e:
+                logger.exception(e)
 
 
 # 简化版布隆过滤器

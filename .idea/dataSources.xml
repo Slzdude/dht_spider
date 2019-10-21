@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="DataSourceManagerImpl" format="xml" multifile-model="true">
-    <data-source source="LOCAL" name="matadata" uuid="6a60f435-a3a1-402e-a1dd-cc808dd777fe">
+    <data-source source="LOCAL" name="metadata" uuid="53a5c22f-f985-444a-85e9-67a58499965d">
       <driver-ref>sqlite.xerial</driver-ref>
       <synchronize>true</synchronize>
       <jdbc-driver>org.sqlite.JDBC</jdbc-driver>
-      <jdbc-url>jdbc:sqlite:E:\Projects\DHT\dht_spider\matadata.db</jdbc-url>
+      <jdbc-url>jdbc:sqlite:E:\Projects\DHT\dht_spider\metadata.db</jdbc-url>
       <driver-properties>
         <property name="enable_load_extension" value="true" />
       </driver-properties>

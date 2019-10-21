@@ -12,22 +12,26 @@
 import six
 
 
+def b(i):
+    return six.int2byte(i)
+
+
 def decode_int(x, f):
     f += 1
-    newf = x.index('e', f)
-    n = int(x[f:newf])
-    if x[f] == '-':
-        if x[f + 1] == '0':
+    new_f = x.index(b'e', f)
+    n = int(x[f:new_f])
+    if b(x[f]) == b'-':
+        if x[f + 1] == b'0':
             raise ValueError
-    elif x[f] == '0' and newf != f + 1:
+    elif b(x[f]) == b'0' and new_f != f + 1:
         raise ValueError
-    return n, newf + 1
+    return n, new_f + 1
 
 
 def decode_string(x, f):
-    colon = x.index(':', f)
-    n = int(x[f:colon])
-    if x[f] == '0' and colon != f + 1:
+    colon = x.index(b':', f)
+    n = int(x[f:colon].decode())
+    if b(x[f]) == b'0' and colon != f + 1:
         raise ValueError
     colon += 1
     return x[colon:colon + n], colon + n
@@ -35,30 +39,31 @@ def decode_string(x, f):
 
 def decode_list(x, f):
     r, f = [], f + 1
-    while x[f] != 'e':
-        v, f = decode_func[x[f]](x, f)
+    while b(x[f]) != b'e':
+        v, f = decode_func[b(x[f])](x, f)
         r.append(v)
     return r, f + 1
 
 
 def decode_dict(x, f):
     r, f = {}, f + 1
-    while x[f] != 'e':
+    while b(x[f]) != b'e':
         k, f = decode_string(x, f)
-        r[k], f = decode_func[x[f]](x, f)
+        r[k], f = decode_func[b(x[f])](x, f)
     return r, f + 1
 
 
 decode_func = {
-    'l': decode_list, 'd': decode_dict, 'i': decode_int, '0': decode_string, '1': decode_string,
-    '2': decode_string, '3': decode_string, '4': decode_string, '5': decode_string, '6': decode_string,
-    '7': decode_string, '8': decode_string, '9': decode_string
+    b'l': decode_list, b'd': decode_dict, b'i': decode_int, b'0': decode_string,
+    b'1': decode_string, b'2': decode_string, b'3': decode_string, b'4': decode_string,
+    b'5': decode_string, b'6': decode_string, b'7': decode_string, b'8': decode_string,
+    b'9': decode_string
 }
 
 
 def bdecode(x):
     try:
-        r, l = decode_func[x[0]](x, 0)
+        r, l = decode_func[b(x[0])](x, 0)
     except (IndexError, KeyError, ValueError):
         raise Exception("not a valid bencoded string")
     # if l != len(x):
