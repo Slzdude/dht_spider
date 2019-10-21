@@ -152,7 +152,6 @@ class Maga(asyncio.DatagramProtocol):
                 pass
             await self.handle_announce_peer(proper_infohash(infohash), addr, peer_addr)
         elif query_type == b"find_node":
-            print("Find Node")
             tid = msg[b"t"]
             self.send_message({
                 "t": tid,

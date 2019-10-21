@@ -2,3 +2,4 @@ gevent
 elasticsearch
 six
 bencoder.pyx
+aioredis
