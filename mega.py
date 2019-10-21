@@ -49,6 +49,12 @@ class Maga(asyncio.DatagramProtocol):
         self.__running = False
         self.interval = interval
 
+    async def init(self):
+        pass
+
+    async def close(self):
+        pass
+
     def stop(self):
         self.__running = False
         self.loop.call_later(self.interval, self.loop.stop)
@@ -62,6 +68,7 @@ class Maga(asyncio.DatagramProtocol):
 
     def run(self, port=6881):
         print("Starting Mega crawler")
+        await self.init()
         coro = self.loop.create_datagram_endpoint(
             lambda: self, local_addr=('0.0.0.0', port)
         )
@@ -80,6 +87,7 @@ class Maga(asyncio.DatagramProtocol):
 
         asyncio.ensure_future(self.auto_find_nodes(), loop=self.loop)
         self.loop.run_forever()
+        await self.close()
         self.loop.close()
 
     def datagram_received(self, data, addr):
