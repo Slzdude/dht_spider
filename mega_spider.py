@@ -137,7 +137,8 @@ class MetaFetcher:
 
 class Crawler(Maga):
     async def init(self):
-        self.redis = await aioredis.create_redis_pool('redis://localhost')
+        # self.redis = await aioredis.create_redis_pool('redis://localhost')
+        pass
 
     async def close(self):
         self.redis.close()
@@ -147,7 +148,7 @@ class Crawler(Maga):
         logging.info(f"Receive get peers message from DHT {addr}. Infohash: {infohash}.")
 
     async def handle_announce_peer(self, infohash, addr, peer_addr):
-        await self.redis.lpush("infohash", infohash)
+        # await self.redis.lpush("infohash", infohash)
         logging.info(f"Receive announce peer message from DHT {addr}. Infohash: {infohash}. Peer address:{peer_addr}")
         asyncio.create_task(MetaFetcher(self.redis, infohash, peer_addr).get_metadata())
 
