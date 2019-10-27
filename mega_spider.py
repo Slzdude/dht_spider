@@ -3,20 +3,24 @@ import gc
 import logging
 import math
 import struct
+from io import BytesIO
 
-import aioredis
 import bencoder
 import six
 
 from mega import Maga, random_node_id
 
-logging.basicConfig(level=logging.INFO)
-
-BT_PROTOCOL = 'BitTorrent protocol'
-
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s'
+)
+BLOCK_SIZE = 16.0 * 1024
+bt_header = b'\x13BitTorrent protocol'
+ext_bytes = b'\x00\x00\x00\x00\x00\x10\x00\x01'
+HANDSHAKE_PREFIX = bt_header + ext_bytes
 # 握手确定 bep_0009 获取元数据扩展协议
-BT_MSG_ID = 20
-EXT_HANDSHAKE_ID = 0
+BT_MSG_ID = b'\x14'
+EXT_HANDSHAKE_ID = b'\x00'
 
 
 class MetaFetcher:
@@ -24,35 +28,30 @@ class MetaFetcher:
         self.redis = redis
         self.infohash = infohash
         self.address = address
-        self.reader, self.writer = await asyncio.open_connection(*address)
+        self.reader, self.writer = None, None
+
+    async def init(self):
+        try:
+            self.reader, self.writer = await asyncio.open_connection(*self.address)
+        except Exception:
+            pass
 
     def check_handshake(self, packet):
-        try:
-            bt_header_len, packet = ord(packet[:1]), packet[1:]
-            if bt_header_len != len(BT_PROTOCOL):
-                return False
-        except TypeError:
+        if bt_header != packet[:20] and packet[25] & 0x10 != 0:
+            logging.error('Packet format error')
             return False
-
-        bt_header, packet = packet[:bt_header_len], packet[bt_header_len:]
-        if bt_header != BT_PROTOCOL:
+        if packet[28:48] != self.infohash:
+            logging.error('Infohash not match')
             return False
-
-        packet = packet[8:]
-        infohash = packet[:20]
-        if infohash != self.infohash:
-            return False
-
         return True
 
-    async def send_handshake(self):
-        bt_header = b'\x13BitTorrent protocol'
-        ext_bytes = b'\x00\x00\x00\x00\x00\x10\x00\x01'
+    def send_handshake(self):
+        logging.debug("send handshake")
         peer_id = random_node_id()
-        packet = struct.pack('ssss', bt_header, ext_bytes, self.infohash, peer_id)
-        await self.writer.write(packet)
+        packet = HANDSHAKE_PREFIX + self.infohash + peer_id
+        self.writer.write(packet)
 
-    async def send_message(self, msg):
+    def send_message(self, msg):
         msg_len = struct.pack('>I', len(msg))
         self.writer.write(msg_len + msg)
 
@@ -63,60 +62,51 @@ class MetaFetcher:
         msg = await asyncio.wait_for(self.reader.readexactly(msg_len), timeout=3)
         return msg
 
-    async def send_ext_handshake(self):
-        msg = chr(BT_MSG_ID) + chr(EXT_HANDSHAKE_ID) + bencoder.bencode({'m': {'ut_metadata': 1}})
-        await self.send_message(msg)
+    def send_ext_handshake(self):
+        logging.debug("send ext handshake")
+        # msg = chr(BT_MSG_ID) + chr(EXT_HANDSHAKE_ID) + bencoder.bencode({'m': {'ut_metadata': 1}})
+        msg = b'\x14\x00d1:md11:ut_metadatai1eee'
+        self.send_message(msg)
 
-    async def request_metadata(self, ut_metadata, piece):
-        msg = b'\x14' + ut_metadata + bencoder.bencode({'msg_type': 0, 'piece': piece})
-        await self.send_message(msg)
-
-    @staticmethod
-    def get_ut_metadata(data):
-        ut_metadata = 'ut_metadata'
-        index = data.index(ut_metadata) + len(ut_metadata) + 1
-        return six.int2byte(data[index])
-
-    @staticmethod
-    def get_metadata_size(data):
-        metadata_size = 'metadata_size'
-        start = data.index(metadata_size) + len(metadata_size) + 1
-        data = data[start:]
-        return int(data[:data.index('e')])
+    def request_metadata(self, ut_metadata, piece):
+        logging.debug("request metadata")
+        msg = BT_MSG_ID + six.int2byte(ut_metadata) + bencoder.bencode({'msg_type': 0, 'piece': piece})
+        self.send_message(msg)
 
     async def get_metadata(self):
-        info = {}
+        if not self.writer or not self.reader:
+            return
         try:
             # handshake
-            await self.send_handshake()
-            packet = await self.reader.read(68)
-            print(bencoder.bdecode(packet))
-            if not self.check_handshake(packet):
+            self.send_handshake()
+            data = await self.reader.readexactly(68)
+            if not self.check_handshake(data):
+                logging.error('Handshake response error: %s', data)
                 return
 
             # ext handshake
-            await self.send_ext_handshake()
-            packet = await self.read_message()
-            print(bencoder.bdecode(packet))
-            msg_type = (await self.reader.read(1))[0]
-            if msg_type != BT_MSG_ID:
-                return
-            extended_id = (await self.reader.read(1))[0]
-            if extended_id != EXT_HANDSHAKE_ID:
-                return
-
-            ut_metadata, metadata_size = self.get_ut_metadata(packet), self.get_metadata_size(packet)
-            # request each piece of metadata
+            self.send_ext_handshake()
             metadata = []
-            for piece in range(int(math.ceil(metadata_size / (16.0 * 1024)))):  # piece是个控制块，根据控制块下载数据
-                await self.request_metadata(ut_metadata, piece)
-                try:
-                    # Wait for 3 seconds, then raise TimeoutError
-                    packet = await asyncio.wait_for(self.reader.read(4096), timeout=3)
-                except asyncio.TimeoutError:
-                    print("Timeout")
-                    return
-
+            data = BytesIO(await self.read_message())
+            if data.read(1) != BT_MSG_ID:
+                return
+            if data.read(1) != EXT_HANDSHAKE_ID:
+                return
+            packet = data.read()
+            meta_dict = bencoder.bdecode(packet)
+            logging.debug('meta_dict: %s', dict(meta_dict))
+            ut_metadata, metadata_size = meta_dict[b'm'][b'ut_metadata'], meta_dict.get(b'metadata_size', 0)
+            if not metadata_size:
+                logging.error('Empty metadata size')
+                return
+            pieces_count = int(math.ceil(metadata_size / BLOCK_SIZE))
+            for piece in range(pieces_count):
+                # piece是个控制块，根据控制块下载数据
+                self.request_metadata(ut_metadata, piece)
+                data = await self.read_message()
+                print(data)
+                data = BytesIO(data)
+                print(bencoder.bdecode(data.read()))
                 metadata.append(packet[packet.index(b'ee') + 2:])
             metadata = b''.join(metadata)
             info = bencoder.bdecode(metadata)
@@ -127,7 +117,7 @@ class MetaFetcher:
             del metadata
             gc.collect()
         except Exception as e:
-            print(e)
+            logging.exception(e)
         finally:
             self.close()  # 确保关闭socket
 
@@ -138,21 +128,33 @@ class MetaFetcher:
 class Crawler(Maga):
     async def init(self):
         # self.redis = await aioredis.create_redis_pool('redis://localhost')
+        self.redis = None
         pass
 
     async def close(self):
         self.redis.close()
 
     async def handle_get_peers(self, infohash, addr):
-        await self.redis.lpush("infohash", infohash)
-        logging.info(f"Receive get peers message from DHT {addr}. Infohash: {infohash}.")
+        # await self.redis.lpush("infohash", infohash)
+        # logging.info(f"Receive get peers message from DHT {addr}. Infohash: {infohash}.")
+        pass
 
     async def handle_announce_peer(self, infohash, addr, peer_addr):
         # await self.redis.lpush("infohash", infohash)
         logging.info(f"Receive announce peer message from DHT {addr}. Infohash: {infohash}. Peer address:{peer_addr}")
-        asyncio.create_task(MetaFetcher(self.redis, infohash, peer_addr).get_metadata())
+        fetcher = MetaFetcher(self.redis, bytes.fromhex(infohash), peer_addr)
+        await fetcher.init()
+        # asyncio.ensure_future(fetcher.get_metadata())
+        await fetcher.get_metadata()
 
 
-crawler = Crawler()
-# Set port to 0 will use a random available port
-crawler.run(port=0)
+if __name__ == '__main__':
+    try:
+        import uvloop
+
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    except:
+        pass
+    crawler = Crawler()
+    # Set port to 0 will use a random available port
+    crawler.run(port=0)

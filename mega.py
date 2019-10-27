@@ -1,5 +1,5 @@
 import asyncio
-import binascii
+import logging
 import os
 import signal
 from socket import inet_ntoa
@@ -7,11 +7,19 @@ from struct import unpack
 
 import bencoder
 
+TOKEN_LENGTH = 2
+
+BOOTSTRAP_NODES = (
+    ("router.bittorrent.com", 6881),
+    ("dht.transmissionbt.com", 6881),
+    ("router.utorrent.com", 6881)
+)
+
 
 def proper_infohash(infohash):
     if isinstance(infohash, bytes):
         # Convert bytes to hex
-        infohash = binascii.hexlify(infohash).decode('utf-8')
+        infohash = infohash.hex()
     return infohash.upper()
 
 
@@ -29,15 +37,6 @@ def split_nodes(nodes):
         ip = inet_ntoa(nodes[i + 20:i + 24])
         port = unpack("!H", nodes[i + 24:i + 26])[0]
         yield nid, ip, port
-
-
-__version__ = '3.0.0'
-
-BOOTSTRAP_NODES = (
-    ("router.bittorrent.com", 6881),
-    ("dht.transmissionbt.com", 6881),
-    ("router.utorrent.com", 6881)
-)
 
 
 class Maga(asyncio.DatagramProtocol):
@@ -132,7 +131,7 @@ class Maga(asyncio.DatagramProtocol):
         if query_type == b"get_peers":
             infohash = args[b"info_hash"]
             infohash = proper_infohash(infohash)
-            token = infohash[:2]
+            token = infohash[:TOKEN_LENGTH]
             self.send_message({
                 "t": msg[b"t"],
                 "y": "r",
@@ -144,7 +143,17 @@ class Maga(asyncio.DatagramProtocol):
             }, addr=addr)
             await self.handle_get_peers(infohash, addr)
         elif query_type == b"announce_peer":
-            infohash = args[b"info_hash"]
+            infohash = proper_infohash(args[b"info_hash"])
+            if infohash[:TOKEN_LENGTH] != args[b"token"].decode():
+                logging.error("Bad Token: %s %s", infohash, args[b'token'])
+                return
+            if args.get(b"implied_port", 0):
+                port = addr[1]
+            else:
+                port = args[b"port"]
+            if port < 1 or port > 65535:
+                logging.error("Bad Port: %d", port)
+                return
             tid = msg[b"t"]
             self.send_message({
                 "t": tid,
@@ -153,12 +162,7 @@ class Maga(asyncio.DatagramProtocol):
                     "id": self.fake_node_id(node_id)
                 }
             }, addr=addr)
-            peer_addr = [addr[0], addr[1]]
-            try:
-                peer_addr[1] = args[b"port"]
-            except KeyError:
-                pass
-            await self.handle_announce_peer(proper_infohash(infohash), addr, peer_addr)
+            await self.handle_announce_peer(infohash, addr, [addr[0], port])
         elif query_type == b"find_node":
             tid = msg[b"t"]
             self.send_message({

@@ -125,7 +125,9 @@ def inquire(infohash, address, metadata_queue, timeout=15):
         ut_metadata, metadata_size = get_ut_metadata(packet), get_metadata_size(packet)
         # request each piece of metadata
         metadata = []
-        for piece in range(int(math.ceil(metadata_size / (16.0 * 1024)))):  # piece是个控制块，根据控制块下载数据
+        pieces_num = int(math.ceil(metadata_size / (16.0 * 1024)))
+        for piece in range(pieces_num):
+            # piece是个控制块，根据控制块下载数据
             request_metadata(the_socket, ut_metadata, piece)
             packet = recv_all(the_socket, timeout)
             metadata.append(packet[packet.index('ee') + 2:])
