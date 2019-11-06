@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import hashlib
 import logging
 import math
 import struct
@@ -26,7 +27,7 @@ EXT_HANDSHAKE_ID = b'\x00'
 class MetaFetcher:
     def __init__(self, redis, infohash, address):
         self.redis = redis
-        self.infohash = infohash
+        self.infohash: bytes = infohash
         self.address = address
         self.reader, self.writer = None, None
 
@@ -103,12 +104,29 @@ class MetaFetcher:
             for piece in range(pieces_count):
                 # piece是个控制块，根据控制块下载数据
                 self.request_metadata(ut_metadata, piece)
-                data = await self.read_message()
-                print(data)
-                data = BytesIO(data)
-                print(bencoder.bdecode(data.read()))
-                metadata.append(packet[packet.index(b'ee') + 2:])
+                while True:
+                    data = BytesIO(await self.read_message())
+                    if data.read(1) != BT_MSG_ID:
+                        continue
+                    if data.read(1) == EXT_HANDSHAKE_ID:
+                        return
+                    packet = data.read()
+                    piece_dict, index = bencoder.decode_dict(packet, 0)
+                    if piece_dict[b'msg_type'] != 1:
+                        continue
+                    piece = piece_dict[b'piece']
+                    piece_len = len(packet) - index
+                    if (piece != pieces_count - 1 and piece_len != BLOCK_SIZE) or (
+                            piece == pieces_count - 1 and piece_len != metadata_size % BLOCK_SIZE):
+                        return
+                    metadata.append(packet[index:])
+                    break
             metadata = b''.join(metadata)
+            sha1_encoder = hashlib.sha1()
+            sha1_encoder.update(metadata)
+            if self.infohash != sha1_encoder.digest():
+                logging.error("Infohash %s not equal to info sha1 %s", self.infohash.hex(), sha1_encoder.hexdigest())
+                return
             info = bencoder.bdecode(metadata)
             print(info)
             # 只记录有效元数据
