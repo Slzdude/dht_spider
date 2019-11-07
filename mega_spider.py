@@ -25,8 +25,7 @@ EXT_HANDSHAKE_ID = b'\x00'
 
 
 class MetaFetcher:
-    def __init__(self, redis, infohash, address):
-        self.redis = redis
+    def __init__(self, infohash, address):
         self.infohash: bytes = infohash
         self.address = address
         self.reader, self.writer = None, None
@@ -61,7 +60,7 @@ class MetaFetcher:
         if msg_len == 0:
             return b''
         msg = await asyncio.wait_for(self.reader.readexactly(msg_len), timeout=3)
-        return msg
+        return BytesIO(msg)
 
     def send_ext_handshake(self):
         logging.debug("send ext handshake")
@@ -74,9 +73,24 @@ class MetaFetcher:
         msg = BT_MSG_ID + six.int2byte(ut_metadata) + bencoder.bencode({'msg_type': 0, 'piece': piece})
         self.send_message(msg)
 
+    @staticmethod
+    def pieces_done(pieces):
+        for piece in pieces:
+            if piece is None:
+                return False
+        return True
+
+    @staticmethod
+    def check_piece(piece, piece_index, piece_count, metadata_size):
+        if piece_index == piece_count - 1:
+            return len(piece) == metadata_size % BLOCK_SIZE
+        else:
+            return len(piece) == BLOCK_SIZE
+
     async def get_metadata(self):
         if not self.writer or not self.reader:
             return
+        result = None
         try:
             # handshake
             self.send_handshake()
@@ -87,53 +101,57 @@ class MetaFetcher:
 
             # ext handshake
             self.send_ext_handshake()
-            metadata = []
-            data = BytesIO(await self.read_message())
-            if data.read(1) != BT_MSG_ID:
-                return
-            if data.read(1) != EXT_HANDSHAKE_ID:
-                return
-            packet = data.read()
-            meta_dict = bencoder.bdecode(packet)
-            logging.debug('meta_dict: %s', dict(meta_dict))
-            ut_metadata, metadata_size = meta_dict[b'm'][b'ut_metadata'], meta_dict.get(b'metadata_size', 0)
-            if not metadata_size:
-                logging.error('Empty metadata size')
-                return
-            pieces_count = int(math.ceil(metadata_size / BLOCK_SIZE))
-            for piece in range(pieces_count):
-                # piece是个控制块，根据控制块下载数据
-                self.request_metadata(ut_metadata, piece)
-                while True:
-                    data = BytesIO(await self.read_message())
-                    if data.read(1) != BT_MSG_ID:
-                        continue
-                    if data.read(1) == EXT_HANDSHAKE_ID:
+            pieces_list = None
+            pieces_count = 0
+            metadata_size = 0
+            while True:
+                data = await self.read_message()
+                if data.read(1) != BT_MSG_ID:
+                    return
+                if data.read(1) == EXT_HANDSHAKE_ID:
+                    if pieces_list is not None:
+                        logging.error("Metadata pended before handshake!")
                         return
+                    packet = data.read()
+                    meta_dict = bencoder.bdecode(packet)
+                    logging.debug('meta_dict: %s', dict(meta_dict))
+                    ut_metadata, metadata_size = meta_dict[b'm'][b'ut_metadata'], meta_dict.get(b'metadata_size', 0)
+                    if not metadata_size:
+                        logging.error('Empty metadata size')
+                        return
+                    pieces_count = int(math.ceil(metadata_size / BLOCK_SIZE))
+                    pieces_list = [b''] * pieces_count
+                    for piece_index in range(pieces_count):
+                        self.request_metadata(ut_metadata, piece_index)
+                    continue
+                else:
+                    if pieces_list is None:
+                        logging.error("metadata_size not defined")
+                        return
+                    # piece是个控制块，根据控制块下载数据
                     packet = data.read()
                     piece_dict, index = bencoder.decode_dict(packet, 0)
                     if piece_dict[b'msg_type'] != 1:
                         continue
-                    piece = piece_dict[b'piece']
-                    piece_len = len(packet) - index
-                    if (piece != pieces_count - 1 and piece_len != BLOCK_SIZE) or (
-                            piece == pieces_count - 1 and piece_len != metadata_size % BLOCK_SIZE):
+                    piece_index = piece_dict[b'piece']
+                    piece_data = packet[len(packet) - index:]
+                    if not self.check_piece(piece_data, piece_index, pieces_count, metadata_size):
                         return
-                    metadata.append(packet[index:])
-                    break
-            metadata = b''.join(metadata)
+                    pieces_list[piece_index] = piece_data
+                    if self.pieces_done(pieces_list):
+                        break
+                    continue
+            pieces = b''.join(pieces_list)
             sha1_encoder = hashlib.sha1()
-            sha1_encoder.update(metadata)
+            sha1_encoder.update(pieces)
             if self.infohash != sha1_encoder.digest():
                 logging.error("Infohash %s not equal to info sha1 %s", self.infohash.hex(), sha1_encoder.hexdigest())
                 return
-            info = bencoder.bdecode(metadata)
-            print(info)
-            # 只记录有效元数据
-            # if info['size'] != '0' and info['name'] != '':
-            #     await self.redis.lpush('metadata', json.dumps(info))
-            del metadata
+            result = bencoder.bdecode(pieces)
+            del pieces
             gc.collect()
+            logging.debug("Fetched metadata")
+            return result
         except Exception as e:
             logging.exception(e)
         finally:
@@ -144,26 +162,20 @@ class MetaFetcher:
 
 
 class Crawler(Maga):
-    async def init(self):
-        # self.redis = await aioredis.create_redis_pool('redis://localhost')
-        self.redis = None
-        pass
-
-    async def close(self):
-        self.redis.close()
-
     async def handle_get_peers(self, infohash, addr):
-        # await self.redis.lpush("infohash", infohash)
-        # logging.info(f"Receive get peers message from DHT {addr}. Infohash: {infohash}.")
-        pass
+        logging.debug(f"Receive get peers message from DHT {addr}. Infohash: {infohash}.")
 
     async def handle_announce_peer(self, infohash, addr, peer_addr):
         # await self.redis.lpush("infohash", infohash)
-        logging.info(f"Receive announce peer message from DHT {addr}. Infohash: {infohash}. Peer address:{peer_addr}")
-        fetcher = MetaFetcher(self.redis, bytes.fromhex(infohash), peer_addr)
+        logging.debug(f"Receive announce peer message from DHT {addr}. Infohash: {infohash}. Peer address:{peer_addr}")
+        fetcher = MetaFetcher(bytes.fromhex(infohash), peer_addr)
         await fetcher.init()
-        # asyncio.ensure_future(fetcher.get_metadata())
+        task = asyncio.ensure_future(fetcher.get_metadata())
+        task.add_done_callback(self.handle_metadata)
         await fetcher.get_metadata()
+
+    def handle_metadata(self, future):
+        data = future.result
 
 
 if __name__ == '__main__':

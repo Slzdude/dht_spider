@@ -48,18 +48,11 @@ class Maga(asyncio.DatagramProtocol):
         self.__running = False
         self.interval = interval
 
-    async def init(self):
-        pass
-
-    async def close(self):
-        pass
-
     def stop(self):
         self.__running = False
         self.loop.call_later(self.interval, self.loop.stop)
 
     async def auto_find_nodes(self):
-        await self.init()
         self.__running = True
         while self.__running:
             await asyncio.sleep(self.interval)
