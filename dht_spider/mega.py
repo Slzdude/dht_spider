@@ -1,11 +1,12 @@
 import asyncio
-import logging
-import os
 import signal
-from socket import inet_ntoa
-from struct import unpack
 
 import bencoder
+
+from dht_spider.logger import setup_logger
+from dht_spider.utils import random_node_id, proper_infohash, split_nodes
+
+logger = setup_logger("Mega Spider")
 
 TOKEN_LENGTH = 2
 
@@ -14,29 +15,6 @@ BOOTSTRAP_NODES = (
     ("dht.transmissionbt.com", 6881),
     ("router.utorrent.com", 6881)
 )
-
-
-def proper_infohash(infohash):
-    if isinstance(infohash, bytes):
-        # Convert bytes to hex
-        infohash = infohash.hex()
-    return infohash.upper()
-
-
-def random_node_id(size=20):
-    return os.urandom(size)
-
-
-def split_nodes(nodes):
-    length = len(nodes)
-    if (length % 26) != 0:
-        return
-
-    for i in range(0, length, 26):
-        nid = nodes[i:i + 20]
-        ip = inet_ntoa(nodes[i + 20:i + 24])
-        port = unpack("!H", nodes[i + 24:i + 26])[0]
-        yield nid, ip, port
 
 
 class Maga(asyncio.DatagramProtocol):
@@ -58,10 +36,9 @@ class Maga(asyncio.DatagramProtocol):
             await asyncio.sleep(self.interval)
             for node in self.bootstrap_nodes:
                 self.find_node(addr=node)
-        await self.close()
 
     def run(self, port=6881):
-        print("Starting Mega crawler")
+        logger.info("Starting Mega crawler")
         coro = self.loop.create_datagram_endpoint(
             lambda: self, local_addr=('0.0.0.0', port)
         )
@@ -138,14 +115,14 @@ class Maga(asyncio.DatagramProtocol):
         elif query_type == b"announce_peer":
             infohash = proper_infohash(args[b"info_hash"])
             if infohash[:TOKEN_LENGTH] != args[b"token"].decode():
-                logging.error("Bad Token: %s %s", infohash, args[b'token'])
+                logger.error("Bad Token: %s %s", infohash, args[b'token'])
                 return
             if args.get(b"implied_port", 0):
                 port = addr[1]
             else:
                 port = args[b"port"]
             if port < 1 or port > 65535:
-                logging.error("Bad Port: %d", port)
+                logger.error("Bad Port: %d", port)
                 return
             tid = msg[b"t"]
             self.send_message({

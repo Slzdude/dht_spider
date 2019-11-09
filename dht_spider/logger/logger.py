@@ -1,10 +1,10 @@
 # coding:utf-8
 import logging
 
-from libs.logger.colorlog import ColoredFormatter
+from dht_spider.logger.colorlog import ColoredFormatter
 
 
-def setup_logger(name='Logger'):
+def setup_logger(name='Logger', level=logging.INFO):
     """Return a logger with a default ColoredFormatter."""
     loggers = logging.getLogger(name)
     if len(loggers.handlers) < 1:
@@ -25,7 +25,7 @@ def setup_logger(name='Logger'):
         handler = logging.StreamHandler()
         handler.setFormatter(formatter)
         loggers.addHandler(handler)
-        loggers.setLevel(logging.INFO)
+        loggers.setLevel(level)
         loggers.propagate = False
     return loggers
 
